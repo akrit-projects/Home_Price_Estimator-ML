@@ -1,12 +1,17 @@
-from fastapi import FastAPI, HTTPException
+from pathlib import Path
+import io
+
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 import joblib
 import pandas as pd
 from pydantic import BaseModel, Field
 
 app = FastAPI()
 
-model = joblib.load("Models\House_predictor\house_model.joblib")
-features = joblib.load("Models\House_predictor\house_features.joblib")
+MODEL_DIR = Path(__file__).resolve().parent / "Models" / "House_predictor"
+model = joblib.load(MODEL_DIR / "house_model.joblib")
+features = joblib.load(MODEL_DIR / "house_features.joblib")
 
 
 class Housefeatures(BaseModel):
@@ -68,3 +73,45 @@ def predict(house: Housefeatures):
 
 
 
+@app.post("/predict-file")
+async def predict_file(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.endswith(".csv"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only CSV files are allowed"
+        )
+    contents = await file.read()
+
+    try:
+        df = pd.read_csv(io.BytesIO(contents))
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not read CSV file: {str(e)}"
+        )
+
+    missing_features = [col for col in features if col not in df.columns]
+    if missing_features:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File is missing required features {missing_features}"
+        )
+    if len(df) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="File contains no rows"
+        )
+    try:
+        predictions = model.predict(df[features])
+        df["predicted_price_usd"] = [f"${price * 100000:,.0f}" for price in predictions]
+        output = df.to_csv(index=False)
+        return StreamingResponse(
+            io.BytesIO(output.encode("utf-8")),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=predictions.csv"}
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Prediction Failed: {str(e)}"
+        )
